@@ -4,7 +4,7 @@ ROC curves generation.
 
 from __future__ import division, print_function, absolute_import
 
-__all__ = ['EvalRoc',
+__all__ = ['EvalRoc', 'Roc',
            'compute_binary_map']
 
 import numpy as np
@@ -18,6 +18,327 @@ from ..var import frame_center, get_annulus_segments
 from ..conf import time_ini, timing, Progressbar
 from ..var import pp_subplots as plots, get_circle
 from .fakecomp import cube_inject_companions
+
+
+
+class Roc(object):
+    COLORS = ["#D62728", "#FF7F0E", "#2CA02C", "#9467BD", "#1F77B4"]
+    SYMBOLS = ["^", "X", "P", "s", "p"]
+
+    def __init__(self):
+        self.injections = []
+        self.algos = []
+        self.iteration_data = []
+
+    def add_algo(self, algo_obj, label, thresholds=None, color=None, symbol=None):
+        nth_algo = len(self.algos)
+
+        if color is None:
+            color = self.COLORS[nth_algo]
+        if symbol is None:
+            symbol = self.SYMBOLS[nth_algo]
+
+        self.algos.append(dict(
+            algo_obj=algo_obj,
+            # per-algo data:
+            label=label, color=color, symbol=symbol, thresholds=thresholds,
+            # per-iteration data, filled by `store()`:
+            detmaps=[], injections_yx=[], fwhms=[],
+            # filled per-iteration by `compute()`:
+            dets=[], fps=[], binmaps=[],
+        ))
+
+        # TODO: return decorated algo object?
+        return algo_obj
+
+    def set_thresholds(self, n, thresholds):
+        self.algos[n]["thresholds"] = thresholds
+
+    def store(self):
+        for algo in self.algos:
+            print("storing algo {}".format(algo["label"]))
+            algo["detmaps"].append(algo["algo_obj"].detection_map)
+
+            # also store dataset specific data, as it may change (multiple dss)
+            algo["injections_yx"].append(algo["algo_obj"].dataset.injections_yx)
+                # [ [ (yx) per injection ] per iteration]
+            algo["fwhms"].append(algo["algo_obj"].dataset.fwhm)
+
+    def compute(self, npix=1, overlap_threshold=0.7, max_blob_fact=2):
+        """
+        Called at the very end.
+
+        Before calling compute, you can still change the "thresholds" of each
+        algo (usign set_thresholds)
+
+        """
+
+        for algo in self.algos:
+            # check for input data
+            thresholds = algo["thresholds"]
+            if thresholds is None:
+                raise RuntimeError("no thresholds set for algo!")
+
+            # reset object, so compute can be called multiple times
+            algo["dets"] = []
+            algo["fps"] = []
+            algo["binmaps"] = []
+
+            nit = len(algo["injections_yx"])  # number of iterations = number of calls to `store()`
+            nthr = len(thresholds)
+
+            # for every iteration / store() call:
+            for n in range(nit):
+                # per-injection data
+                image = algo["detmaps"][n]
+                injections_xy = [pos[::-1] for pos in algo["injections_yx"][n]]
+                fwhm = algo["fwhms"][n]
+
+                dets, fps, binmaps = compute_binary_map(
+                    image, thresholds, injections_xy, fwhm, npix,
+                    overlap_threshold, max_blob_fact, plot=False, debug=False
+                )
+
+                algo["dets"].append(dets)  # [ [int per threshold] per iteration ]
+                algo["fps"].append(fps)    # [ [int per threshold] per iteration ]
+                algo["binmaps"].append(binmaps)  # [ [frame per threshold] per iteration ]
+
+
+            # summing up
+            print("dets", algo["dets"])
+            print("injections_yx", algo["injections_yx"])
+            injections_per_iteration = [len(yx_per_inj) for yx_per_inj in algo["injections_yx"]]
+            total_injections = sum(injections_per_iteration)
+            algo["dets_per_thr"] = [sum(algo["dets"][iit][ithr] for iit in range(nit))
+                                    for ithr in range(nthr)]
+            print("dets_per_thr", algo["dets_per_thr"])
+            algo["tpr_per_thr"] = np.asarray(algo["dets_per_thr"]) / total_injections
+
+            algo["mean_fps_per_thr"] = [np.mean([algo["fps"][iit][ithr] for iit in range(nit)])
+                                        for ithr in range(nthr)]
+            # TODO: sure this should be a mean? The two datasets could be quite different?
+
+
+
+    def plot(self, dpi=100, figsize=(5, 5), xmin=None, xmax=None,
+                        ymin=-0.05, ymax=1.02, xlog=True, label_skip_one=False,
+                        legend_loc='lower right', legend_size=6,
+                        show_data_labels=True, hide_overlap_label=True,
+                        label_gap=(0, -0.028), save_plot=False, label_params={},
+                        line_params={}, marker_params={}, verbose=True):
+        """
+        Parameters
+        ----------
+
+
+        Returns
+        -------
+        None, but modifies `methods`: adds .tpr and .mean_fps attributes
+
+        Notes
+        -----
+        # TODO: load `roc_injections` and `roc_tprfps` from file (`load_res`)
+        # TODO: print flux distro information (is it actually stored in inj?
+        What to do with functions, do they pickle?)
+        # TODO: hardcoded `methodconf`?
+
+        """
+        labelskw = dict(alpha=1, fontsize=5.5, weight="bold", rotation=0,
+                        annotation_clip=True)
+        linekw = dict(alpha=0.2)
+        markerkw = dict(alpha=0.5, ms=3)
+        labelskw.update(label_params)
+        linekw.update(line_params)
+        markerkw.update(marker_params)
+
+        fig = plt.figure(figsize=figsize, dpi=dpi)
+        ax = fig.add_subplot(111)
+
+        if not isinstance(label_skip_one, (list, tuple)):
+            label_skip_one = [label_skip_one]*len(self.algos)
+        labels = []
+
+        #for i, m in enumerate(self.methods):
+        for i, algo in enumerate(self.algos):
+
+            plt.plot(algo["mean_fps_per_thr"], algo["tpr_per_thr"], '--',
+                     color=algo["color"], **linekw)
+            plt.plot(algo["mean_fps_per_thr"], algo["tpr_per_thr"],
+                     algo["symbol"], label=algo["label"], color=algo["color"],
+                     **markerkw)
+
+            if show_data_labels:
+                if label_skip_one[i]:
+                    lab_x = np.array(algo["mean_fps_per_thr"][1::2])
+                    lab_y = np.array(algo["tpr_per_thr"])
+                    thr = np.array(algo["thresholds"][1::2])
+                else:
+                    lab_x = np.array(algo["mean_fps_per_thr"])
+                    lab_y = np.array(algo["tpr_per_thr"])
+                    thr = np.array(algo["thresholds"])
+
+                for i, xy in enumerate(zip(lab_x + label_gap[0],
+                                           lab_y + label_gap[1])):
+                    labels.append(ax.annotate('{:.2f}'.format(thr[i]),
+                                  xy=xy, xycoords='data', color=algo["color"],
+                                              **labelskw))
+                    # TODO: reverse order of `self.methods` for better annot. z-index?
+
+        plt.legend(loc=legend_loc, prop={'size': legend_size})
+        if xlog:
+            ax.set_xscale("symlog")
+        plt.ylim(ymin=ymin, ymax=ymax)
+        plt.xlim(xmin=xmin, xmax=xmax)
+        plt.ylabel('TPR')
+        plt.xlabel('Full-frame mean FPs')
+        plt.grid(alpha=0.4)
+
+        if show_data_labels:
+            mask = np.zeros(fig.canvas.get_width_height(), bool)
+
+            fig.canvas.draw()
+
+            for label in labels:
+                bbox = label.get_window_extent()
+                negpad = -2
+                x0 = int(bbox.x0) + negpad
+                x1 = int(np.ceil(bbox.x1)) + negpad
+                y0 = int(bbox.y0) + negpad
+                y1 = int(np.ceil(bbox.y1)) + negpad
+
+                s = np.s_[x0:x1, y0:y1]
+                if np.any(mask[s]):
+                    if hide_overlap_label:
+                        label.set_visible(False)
+                else:
+                    mask[s] = True
+
+        if save_plot:
+            if not isinstance(save_plot, str):
+                save_plot = "roc_curve.pdf"
+            plt.savefig(save_plot, dpi=dpi, bbox_inches='tight')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 class EvalRoc(object):
@@ -503,9 +824,12 @@ def compute_binary_map(frame, thresholds, injections, fwhm, npix=1,
     npix_circ_aperture = reselem_mask.shape[0]
 
     # normalize injections: accepts combinations of 1d/2d and tuple/list/array.
+    # print(injections)
     injections = np.asarray(injections)
     if injections.ndim == 1:
         injections = np.array([injections])
+    # print("got injections:", injections, injections.shape, injections.ndim)
+
 
     for ithr, threshold in enumerate(thresholds):
         if debug:
@@ -589,6 +913,9 @@ def compute_binary_map(frame, thresholds, injections, fwhm, npix=1,
     return list_detections, list_fps, list_binmaps
 
 
+
+
+# TO BE REMOVED:
 def _create_synt_cube(cube, psf, ang, plsc, dist, flux, theta=None,
                       verbose=False):
     """

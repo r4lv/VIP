@@ -31,7 +31,7 @@ from .metrics import (frame_quick_report, cube_inject_companions,
                       cube_copies_with_injections,
                       generate_cube_copies_with_injections, snr_ss,
                       snr_peakstddev, snrmap, snrmap_fast, detection,
-                      normalize_psf)
+                      normalize_psf, compute_binary_map)
 
 from .conf.utils_conf import check_array, Saveable, print_precision
 from .conf.mem import check_enough_memory
@@ -50,8 +50,10 @@ class HCIFrame(object):
     fwhm : float, optional
         The FWHM associated with this dataset (instrument dependent). Required
         for several methods (operations on the cube).
+    injections_yx : list of tuple(y, x)
+        Positions of the (possible) injections.
     """
-    def __init__(self, image, hdu=0, fwhm=None):
+    def __init__(self, image, hdu=0, fwhm=None, injections_yx=None):
         """ HCIFrame object initialization. """
         if isinstance(image, str):
             self.image = open_fits(image, hdu, verbose=False)
@@ -65,7 +67,9 @@ class HCIFrame(object):
 
         self.fwhm = fwhm
         if self.fwhm is not None:
-            print('FWHM: {}'.format(self.fwhm))
+            print('FWHM: {}'.format(self.fwhm))  # TODO: verbose parameter?
+
+        self.injections_yx = injections_yx
 
     def crop(self, size, xy=None, force=False):
         """ Cropping the frame.
@@ -82,6 +86,17 @@ class HCIFrame(object):
 
         """
         self.image = frame_crop(self.image, size, xy, force, verbose=True)
+
+    def compute_binary_map(self, thresholds, npix=1, overlap_threshold=0.7,
+                           max_blob_fact=2, plot=False, debug=False):
+        injections_xy = [pos[::-1] for pos in self.injections_yx]
+        det, fps, binmaps = compute_binary_map(
+            self.image, thresholds, injections_xy, self.fwhm, npix,
+            overlap_threshold, max_blob_fact, plot, debug
+        )
+
+        # TODO: these could be stored on the object itself?
+        return det, fps, binmaps
 
     def detect_blobs(self, psf, bkg_sigma=1, method='lpeaks',
                      matched_filter=False, mask=True, snr_thresh=5, plot=True,
@@ -586,6 +601,22 @@ class HCIDataset(Saveable):
 
         self.injections_yx = None
 
+    def _make_frame(self, array, **kwargs):
+        """
+        Create a HCIFrame object from ``array`` and copy attributes.
+        """
+        if "fwhm" not in kwargs:
+            kwargs["fwhm"] = self.fwhm
+        if "injections_yx" not in kwargs:
+            kwargs["fwhm"] = self.injections_yx
+
+        frame = HCIFrame(array)
+        for k, v in kwargs.items():
+            frame.setattr(k, v)
+
+        return frame
+
+
     def collapse(self, mode='median', n=50):
         """ Collapsing the sequence into a 2d array.
 
@@ -848,17 +879,17 @@ class HCIDataset(Saveable):
             Copy of the original HCIDataset, with injected companions.
 
         """
-        
+
         for data in generate_cube_copies_with_injections(
             self.cube, self.psf, self.angles, self.px_scale, n_copies=n_copies,
-            inrad=inrad, outrad=outrad, dist_flux=dist_flux, check_mem=False
+            inrad=inrad, outrad=outrad, dist_flux=dist_flux
         ):
 
             dsi = self.copy()
             dsi.cube = data["cube"]
-            dsi.injections_yx = data["position"]
+            dsi.injections_yx = data["positions"]
             # data["dist"], data["theta"], data["flux"] are not used.
-            
+
             yield dsi
 
     def copies_with_injections(self, n_copies, inrad=8, outrad=12,
@@ -900,7 +931,7 @@ class HCIDataset(Saveable):
                                                  1.5, verbose=False):
             raise RuntimeError("copies_with_injections would require more "
                                "memory than available.")
-        
+
         res = cube_copies_with_injections(self.cube, self.psf, self.angles,
                                           self.px_scale, n_copies=n_copies,
                                           inrad=inrad, outrad=outrad,

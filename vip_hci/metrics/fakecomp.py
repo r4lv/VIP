@@ -206,7 +206,7 @@ def cube_inject_companions(array, psf_template, angle_list, flevel, plsc,
 
 
 def cube_copies_with_injections(array, psf_template, angle_list, plsc,
-                                n_copies=100, inrad=8, outrad=12, 
+                                n_copies=100, inrad=8, outrad=12,
                                 dist_flux=("uniform", 2, 500),
                                 check_mem=True):
     """
@@ -299,7 +299,7 @@ def cube_copies_with_injections(array, psf_template, angle_list, plsc,
         injy = yy[inds_inj[n]] - frame_center(array[0])[0]
         dist = np.sqrt(injx**2 + injy**2)
         theta = np.mod(np.arctan2(injy, injx) / np.pi * 180, 360)
-        
+
         fake_cube, positions = cube_inject_companions(
             array, psf_template, angle_list, plsc=plsc,
             flevel=fluxes[n], theta=theta,
@@ -312,12 +312,12 @@ def cube_copies_with_injections(array, psf_template, angle_list, plsc,
             dist=dist, theta=theta, flux=fluxes[n],
             cube=fake_cube
         ))
-    
+
     return fake_data
 
 
 def generate_cube_copies_with_injections(array, psf_template, angle_list, plsc,
-                                         n_copies=100, inrad=8, outrad=12, 
+                                         n_copies=100, inrad=8, outrad=12,
                                          dist_flux=("uniform", 2, 500)):
     """
     Create multiple copies of ``array`` with different random injections.
@@ -392,13 +392,13 @@ def generate_cube_copies_with_injections(array, psf_template, angle_list, plsc,
     inds_inj = np.random.randint(0, num_patches, size=n_copies)
 
     # Injections
-    for n in n_copies: # Progressbar(range(n_copies), desc="injecting"):
+    for n in range(n_copies):  # Progressbar(range(n_copies), desc="injecting"):
 
         injx = xx[inds_inj[n]] - frame_center(array[0])[1]
         injy = yy[inds_inj[n]] - frame_center(array[0])[0]
         dist = np.sqrt(injx**2 + injy**2)
         theta = np.mod(np.arctan2(injy, injx) / np.pi * 180, 360)
-        
+
         fake_cube, positions = cube_inject_companions(
             array, psf_template, angle_list, plsc=plsc,
             flevel=fluxes[n], theta=theta,
